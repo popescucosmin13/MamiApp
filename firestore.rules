@@ -1,0 +1,708 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function adminDoc() {
+      return /databases/$(database)/documents/adminUsers/$(request.auth.uid);
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(adminDoc())
+        && get(adminDoc()).data.isActive == true;
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function userCanUpdateOwnProfile(userId) {
+      return isOwner(userId)
+        && !changedKeys().hasAny([
+          'subscription',
+          'isPremium',
+          'role',
+          'disabled',
+          'adminNotes',
+          'deletedAt',
+          'moduleOverrides'
+        ]);
+    }
+
+    function familyMemberData(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)/family_members/$(request.auth.uid)).data;
+    }
+
+    function hasFamilyAccess(userId, childId, permission) {
+      let member = familyMemberData(userId);
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(userId)/family_members/$(request.auth.uid))
+        && member.childId == childId
+        && (!('status' in member) || member.status in ['active', 'accepted'])
+        && (!('inviteStatus' in member) || member.inviteStatus == 'accepted')
+        && member.permissions[permission] == true;
+    }
+
+    function canViewChild(userId, childId) {
+      return isOwner(userId)
+        || isAdmin()
+        || hasFamilyAccess(userId, childId, 'viewTracking')
+        || hasFamilyAccess(userId, childId, 'viewGrowth')
+        || hasFamilyAccess(userId, childId, 'viewVaccines')
+        || hasFamilyAccess(userId, childId, 'viewDocuments');
+    }
+
+    function canAddChildRecord(userId, childId) {
+      return isOwner(userId)
+        || hasFamilyAccess(userId, childId, 'addRecords');
+    }
+
+    function canViewChildDocuments(userId, childId) {
+      return isOwner(userId) || isAdmin() || hasFamilyAccess(userId, childId, 'viewDocuments');
+    }
+
+    function isDocumentType(type) {
+      return type in [
+        'birth_certificate',
+        'vaccine_card',
+        'ultrasound',
+        'analysis',
+        'prescription',
+        'discharge_letter',
+        'other'
+      ];
+    }
+
+    function validCommunityCategory(category) {
+      return category in [
+        'general',
+        'intrebari',
+        'sfaturi',
+        'povesti',
+        'produse',
+        'nutritie',
+        'somn',
+        'sanatate'
+      ];
+    }
+
+    // Validare reacții: trebuie să fie un map și fiecare cheie să fie un tip de reacție valid
+    function validReactionKeys(reactions) {
+      return reactions is map
+        && reactions.keys().hasOnly(['strong', 'idea', 'hug', 'sad']);
+    }
+
+    // Utilizatorul poate actualiza doar propriile reacții (adaugă sau elimină UID-ul propriu)
+    // Verificăm că nu sunt modificate mai mult de 2 chei ale map-ului (swap reacție)
+    function isOwnReactionUpdate() {
+      let newReactions = request.resource.data.reactions;
+      return validReactionKeys(newReactions);
+    }
+
+    match /users/{userId} {
+      allow get, list: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if userCanUpdateOwnProfile(userId)
+        || (isAdmin() && changedKeys().hasOnly([
+          'disabled',
+          'adminNotes',
+          'updatedAt',
+          'subscription',
+          'isPremium',
+          'moduleOverrides',
+          'emailMarketingUnsubscribed',
+          'emailMarketingUnsubscribedAt',
+          'emailMarketingResubscribedAt',
+          'emailPreferences'
+        ]));
+      allow delete: if false;
+
+      match /devices/{deviceId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId)
+          && request.resource.data.token is string
+          && request.resource.data.platform in ['ios', 'android', 'web'];
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /usage/{date} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
+
+      match /summaries/{date} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
+
+      // Smart notifications — stare per utilizator (scrisă doar de Cloud Functions)
+      match /notificationState/{stateId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
+
+      // Istoric notificări trimise; clientul poate marca doar deschiderea
+      match /notificationLog/{logId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow update: if isOwner(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['opened', 'openedAt'])
+          && request.resource.data.opened == true;
+        allow create, delete: if false;
+      }
+
+      // Histograma orelor de utilizare — pentru ora personală de trimitere
+      match /engagement/{docId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId);
+        allow delete: if false;
+      }
+
+      match /sleepProfiles/{childId} {
+        allow read: if canViewChild(userId, childId);
+        allow create, update, delete: if isOwner(userId);
+      }
+
+      match /ai_conversations/{conversationId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId)
+          && request.resource.data.context in ['pregnancy', 'child']
+          && request.resource.data.messages is list
+          && request.resource.data.messageCount is number
+          && request.resource.data.messageCount <= 200;
+        allow update: if isOwner(userId)
+          && request.resource.data.context in ['pregnancy', 'child']
+          && request.resource.data.messages is list
+          && request.resource.data.messageCount is number
+          && request.resource.data.messageCount <= 200;
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /invitations/{token} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
+
+      match /family_members/{memberId} {
+        allow read: if isOwner(userId) || isAdmin() || (signedIn() && request.auth.uid == memberId);
+        allow write: if false;
+      }
+
+      match /shared_children/{sharedChildId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
+
+      match /documents/{documentId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId)
+          && request.resource.data.keys().hasAll(['type', 'name', 'fileUrl', 'uploadedAt'])
+          && isDocumentType(request.resource.data.type);
+        allow update: if isOwner(userId) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /pregnancy/current {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId);
+        allow delete: if false;
+
+        match /weight_logs/{logId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['week', 'weight', 'date'])
+            && request.resource.data.week is number
+            && request.resource.data.weight is number
+            && request.resource.data.weight > 0
+            && request.resource.data.weight < 300;
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /symptoms/{symptomId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['date', 'symptom', 'severity'])
+            && request.resource.data.severity >= 1
+            && request.resource.data.severity <= 5;
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /movements/{movementId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['date', 'count'])
+            && request.resource.data.count >= 0;
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /contractions/{contractionId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['startTime', 'intensity'])
+            && request.resource.data.intensity >= 1
+            && request.resource.data.intensity <= 5;
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /appointments/{aptId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['date', 'type', 'status'])
+            && request.resource.data.status in ['scheduled', 'completed', 'missed'];
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /vitals/{vitalId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['date', 'type', 'values'])
+            && request.resource.data.type in ['blood_pressure', 'glucose', 'hemoglobin', 'weight', 'heart_rate', 'sleep'];
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /journal/{entryId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['date', 'content'])
+            && request.resource.data.content is string
+            && request.resource.data.content.size() <= 5000;
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /questions/{questionId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['question', 'asked', 'createdAt'])
+            && request.resource.data.question is string
+            && request.resource.data.question.size() <= 1000;
+          allow update, delete: if isOwner(userId);
+        }
+      }
+
+      match /diversification/{childId} {
+        allow read: if canViewChild(userId, childId);
+        allow create, update: if isOwner(userId);
+        allow delete: if false;
+
+        match /profile/{docId} {
+          allow read: if canViewChild(userId, childId);
+          allow write: if isOwner(userId);
+        }
+        match /foods/{foodId} {
+          allow read: if canViewChild(userId, childId);
+          allow write: if isOwner(userId);
+        }
+        match /meals/{mealId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if canAddChildRecord(userId, childId);
+          allow update, delete: if isOwner(userId);
+        }
+        match /reactions/{reactionId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if canAddChildRecord(userId, childId);
+          allow update, delete: if isOwner(userId);
+        }
+      }
+
+      match /children/{childId} {
+        allow read: if canViewChild(userId, childId);
+        allow create: if isOwner(userId)
+          && request.resource.data.keys().hasAll(['name', 'birthDate']);
+        allow update: if isOwner(userId);
+        allow delete: if false;
+
+        match /feeds/{feedId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if canAddChildRecord(userId, childId)
+            && request.resource.data.keys().hasAll(['type', 'timestamp'])
+            && request.resource.data.type in ['breastfeeding', 'bottle', 'solid'];
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /sleeps/{sleepId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update, delete: if canAddChildRecord(userId, childId);
+        }
+
+        match /sleepSignals/{signalId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update, delete: if canAddChildRecord(userId, childId);
+        }
+
+        match /diapers/{diaperId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if canAddChildRecord(userId, childId)
+            && request.resource.data.keys().hasAll(['type', 'timestamp'])
+            && request.resource.data.type in ['wet', 'dirty', 'both', 'dry'];
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /measurements/{measurementId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if canAddChildRecord(userId, childId)
+            && request.resource.data.keys().hasAll(['date'])
+            && (
+              ('weight' in request.resource.data && request.resource.data.weight > 0 && request.resource.data.weight < 100)
+              || ('height' in request.resource.data && request.resource.data.height > 30 && request.resource.data.height < 200)
+              || ('headCircumference' in request.resource.data && request.resource.data.headCircumference > 20 && request.resource.data.headCircumference < 80)
+            );
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /vaccines/{vaccineId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if isOwner(userId);
+          allow update: if isOwner(userId)
+            && request.resource.data.status in ['pending', 'scheduled', 'completed', 'done', 'skipped'];
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+
+        match /milestones/{milestoneId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update: if isOwner(userId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+
+        match /foods/{foodId} {
+          allow read: if canViewChild(userId, childId);
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAny(['foodKey', 'foodId', 'name'])
+            && (!('status' in request.resource.data) || request.resource.data.status in ['tried', 'avoided', 'unknown']);
+          allow update, delete: if isOwner(userId);
+        }
+
+        match /documents/{documentId} {
+          allow read: if canViewChildDocuments(userId, childId);
+          allow create: if isOwner(userId)
+            && request.resource.data.keys().hasAll(['type', 'name', 'fileUrl', 'uploadedAt'])
+            && isDocumentType(request.resource.data.type);
+          allow update, delete: if isOwner(userId) || isAdmin();
+        }
+
+        
+        match /development_insights/{insightId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update: if isOwner(userId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+
+        match /cdc_milestones/{milestoneId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update: if isOwner(userId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+        match /school/{schoolDoc} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update, delete: if isOwner(userId);
+        }
+
+        match /teeth/{toothId} {
+          allow read: if canViewChild(userId, childId);
+          allow create, update: if isOwner(userId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+      }
+    }
+
+    match /community_posts/{postId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.keys().hasAll(['title', 'content', 'category', 'authorId', 'createdAt'])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 3
+        && request.resource.data.title.size() <= 160
+        && request.resource.data.content is string
+        && request.resource.data.content.size() >= 1
+        && request.resource.data.content.size() <= 2000
+        && validCommunityCategory(request.resource.data.category)
+        && (!('isPinned' in request.resource.data) || request.resource.data.isPinned == false)
+        && (!('isVerifiedSpecialist' in request.resource.data) || request.resource.data.isVerifiedSpecialist == false)
+        && (!('reactions' in request.resource.data) || request.resource.data.reactions == {});
+
+      // Adminul poate modifica orice
+      allow update: if isAdmin()
+
+        // Autorul poate edita conținutul propriu (nu poate schimba like-uri, reacții, stare admin)
+        || (
+          signedIn()
+          && request.auth.uid == resource.data.authorId
+          && !changedKeys().hasAny(['authorId', 'authorName', 'isPinned', 'isVerifiedSpecialist',
+                                    'status', 'likes', 'likesCount', 'commentsCount', 'reactions'])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() >= 3
+          && request.resource.data.title.size() <= 160
+          && request.resource.data.content is string
+          && request.resource.data.content.size() >= 1
+          && request.resource.data.content.size() <= 2000
+        )
+
+        // Orice utilizator autentificat poate da like / unlike — DOAR pentru propriul UID
+        || (
+          signedIn()
+          && changedKeys().hasOnly(['likes', 'likesCount'])
+          && request.resource.data.likes is list
+          && (
+            // adaugă propriul like
+            (
+              request.resource.data.likesCount == resource.data.likesCount + 1
+              && !(request.auth.uid in resource.data.likes)
+              && request.auth.uid in request.resource.data.likes
+            )
+            // retrage propriul like
+            || (
+              request.resource.data.likesCount == resource.data.likesCount - 1
+              && request.auth.uid in resource.data.likes
+              && !(request.auth.uid in request.resource.data.likes)
+            )
+          )
+        )
+
+        // Orice utilizator autentificat poate adăuga / elimina reacții emoji
+        || (
+          signedIn()
+          && changedKeys().hasOnly(['reactions'])
+          && isOwnReactionUpdate()
+        )
+
+        // Actualizare contor comentarii (scris de client după addDoc pe subcollecție)
+        || (
+          signedIn()
+          && changedKeys().hasOnly(['commentsCount'])
+          && request.resource.data.commentsCount == resource.data.commentsCount + 1
+        );
+
+      allow delete: if isAdmin() || (signedIn() && request.auth.uid == resource.data.authorId);
+
+      match /comments/{commentId} {
+        allow read: if signedIn();
+
+        allow create: if signedIn()
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.keys().hasAll(['authorId', 'authorName', 'content', 'createdAt'])
+          && request.resource.data.content is string
+          && request.resource.data.content.size() >= 1
+          && request.resource.data.content.size() <= 500
+          && request.resource.data.authorName is string
+          // Câmpuri opționale pentru reply
+          && (!('replyToCommentId' in request.resource.data)
+              || request.resource.data.replyToCommentId is string)
+          && (!('replyToAuthorName' in request.resource.data)
+              || request.resource.data.replyToAuthorName is string);
+
+        // Autorul poate edita doar conținutul propriu
+        allow update: if signedIn()
+          && request.auth.uid == resource.data.authorId
+          && changedKeys().hasOnly(['content', 'updatedAt'])
+          && request.resource.data.content is string
+          && request.resource.data.content.size() >= 1
+          && request.resource.data.content.size() <= 500;
+
+        allow delete: if isAdmin() || (signedIn() && request.auth.uid == resource.data.authorId);
+      }
+    }
+
+    match /vaccines_master/{vaccineId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /milestones_master/{milestoneId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /foods_master/{foodId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    
+    match /sensitive_periods/{periodId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /development_plans/{planId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+    match /pregnancy_weeks/{weekId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /articles/{articleId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+
+      // Un document per cititor (dedup automat) — folosit pentru "câți au citit" în admin.
+      match /reads/{uid} {
+        allow read: if isAdmin();
+        allow create, update: if signedIn() && request.auth.uid == uid;
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /{path=**}/family_members/{memberId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /adminUsers/{adminId} {
+      allow get: if signedIn() && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow update: if signedIn()
+        && request.auth.uid == adminId
+        && resource.data.isActive == true
+        && changedKeys().hasOnly(['lastLogin']);
+      allow create, delete: if false;
+    }
+
+    match /adminAuditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /notificationCampaigns/{campaignId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Smart notifications — conținut zilnic (sarcină/copil), gestionat din admin
+    match /notificationContent/{contentId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Template-uri notificări smart (titlu/corp/prioritate per tip)
+    match /notificationTemplates/{templateId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Setări globale orchestrator (cap zilnic, ore de liniște)
+    match /notificationSettings/{settingId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Template-uri emailuri automate (winback + drip onboarding) — admin only
+    match /notificationEmails/{emailId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Contoare sent/opened per tip — scrise doar de Cloud Functions
+    match /notificationStats/{statId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Adminul poate vedea istoricul notificărilor tuturor utilizatorilor
+    match /{path=**}/notificationLog/{logId} {
+      allow read: if isAdmin();
+    }
+
+    match /featureFlags/{flagId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /planConfigs/{planId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /moduleCatalog/{moduleId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /premiumVouchers/{voucherId} {
+      allow read: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /voucherRedemptions/{redemptionId} {
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /appConfig/{configId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /mail/{mailId} {
+      allow read, write: if false;
+    }
+
+    match /emailTemplates/{templateId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /emailCampaigns/{campaignId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /emailUnsubscribes/{unsubscribeId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /emailUnsubscribeTokens/{tokenId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /aiPromptTemplates/{promptId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /aiUsageLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /{path=**}/ai_conversations/{conversationId} {
+      allow read: if isAdmin();
+    }
+
+    match /supportTickets/{ticketId} {
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.subject is string
+        && request.resource.data.subject.size() >= 4
+        && request.resource.data.subject.size() <= 90
+        && request.resource.data.message is string
+        && request.resource.data.message.size() >= 10
+        && request.resource.data.message.size() <= 1200
+        && request.resource.data.category in ['feedback', 'bug', 'idea', 'account', 'other']
+        && request.resource.data.status == 'open'
+        && request.resource.data.priority in ['low', 'medium'];
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

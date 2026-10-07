@@ -1,0 +1,17 @@
+{
+  "name": "mamiapp-scripts",
+  "private": true,
+  "description": "Scripturi de populare Firestore (master data + continut notificari). Rulare: npm install, apoi npx ts-node <script>.ts",
+  "scripts": {
+    "populate:master": "ts-node populate-master-data.ts",
+    "populate:notifications": "ts-node populate-notification-content.ts"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}

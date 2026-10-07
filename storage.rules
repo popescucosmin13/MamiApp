@@ -1,0 +1,102 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function adminDoc() {
+      return /databases/(default)/documents/adminUsers/$(request.auth.uid);
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && firestore.exists(adminDoc())
+        && firestore.get(adminDoc()).data.isActive == true;
+    }
+
+    function familyDoc(userId) {
+      return /databases/(default)/documents/users/$(userId)/family_members/$(request.auth.uid);
+    }
+
+    function canViewChildDocuments(userId, childId) {
+      return isOwner(userId)
+        || isAdmin()
+        || (
+          signedIn()
+          && firestore.exists(familyDoc(userId))
+          && firestore.get(familyDoc(userId)).data.childId == childId
+          && firestore.get(familyDoc(userId)).data.permissions.viewDocuments == true
+          && (!('status' in firestore.get(familyDoc(userId)).data)
+            || firestore.get(familyDoc(userId)).data.status in ['active', 'accepted'])
+          && (!('inviteStatus' in firestore.get(familyDoc(userId)).data)
+            || firestore.get(familyDoc(userId)).data.inviteStatus == 'accepted')
+        );
+    }
+
+    function isImageOrPdf() {
+      return request.resource.contentType.matches('image/.*')
+        || request.resource.contentType == 'application/pdf';
+    }
+
+    function isUnderLimit(maxMb) {
+      return request.resource.size <= maxMb * 1024 * 1024;
+    }
+
+    match /users/{userId}/documents/{fileName} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isImageOrPdf() && isUnderLimit(20);
+      allow update: if false;
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /users/{userId}/children/{childId}/{fileName} {
+      allow read: if canViewChildDocuments(userId, childId);
+      allow create: if isOwner(userId) && isImageOrPdf() && isUnderLimit(20);
+      allow update: if false;
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /users/{userId}/avatar/{fileName} {
+      allow read: if signedIn();
+      allow create, update: if isOwner(userId)
+        && request.resource.contentType.matches('image/.*')
+        && isUnderLimit(5);
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /exports/{userId}/{exportFile} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if false;
+    }
+
+    // Media articole (coperți, imagini inline, video) — încărcate doar de admini.
+    // Citire publică: apar în aplicație, în emailuri și în link-uri partajate.
+    match /articles/{fileName} {
+      allow read: if true;
+      allow create, update: if isAdmin()
+        && (
+          (request.resource.contentType.matches('image/.*') && isUnderLimit(10))
+          || (request.resource.contentType.matches('video/.*') && isUnderLimit(100))
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /community/{postId}/{imageFile} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.contentType.matches('image/.*')
+        && isUnderLimit(10);
+      allow update, delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

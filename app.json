@@ -1,0 +1,113 @@
+{
+  "expo": {
+    "name": "MamiApp",
+    "slug": "mamiapp-portfolio",
+    "version": "1.2.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "mamiapp-portfolio",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FDF6F0"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.example.mamiapp",
+      "associatedDomains": [],
+      "infoPlist": {
+        "NSCameraUsageDescription": "MamiApp folosește camera pentru a fotografia documente medicale și poze cu copilul.",
+        "NSPhotoLibraryUsageDescription": "MamiApp accesează galeria pentru a adăuga poze în jurnal.",
+        "NSMicrophoneUsageDescription": "MamiApp folosește microfonul pentru funcția de voce din asistent.",
+        "NSUserNotificationsUsageDescription": "MamiApp trimite notificări pentru vaccinuri, programări și sumarul zilnic."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FDF6F0"
+      },
+      "package": "com.example.mamiapp",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
+      "intentFilters": [],
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "name": "MamiApp",
+      "shortName": "MamiApp",
+      "description": "Aplicația ta pentru maternitate - sarcină, bebeluș și mai mult.",
+      "lang": "ro",
+      "scope": "/",
+      "themeColor": "#E8997A",
+      "backgroundColor": "#FDF6F0",
+      "display": "standalone",
+      "orientation": "portrait",
+      "icon": {
+        "any": "./assets/icon.png",
+        "maskable": "./assets/adaptive-icon.png"
+      }
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://example.com",
+          "asyncRoutes": {
+            "web": true,
+            "default": false
+          }
+        }
+      ],
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#E8997A",
+          "sounds": []
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "MamiApp folosește camera pentru a fotografia documente medicale."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "MamiApp accesează galeria pentru adăugarea pozelor."
+        }
+      ],
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "router": {
+        "origin": false,
+        "asyncRoutes": {
+          "web": true,
+          "default": false
+        }
+      }
+    },
+    "runtimeVersion": "1.0.15",
+    "updates": {
+      "enabled": false
+    }
+  }
+}
